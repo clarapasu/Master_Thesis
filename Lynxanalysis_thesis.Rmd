@@ -1,0 +1,253 @@
+---
+title: "Lynx analysis"
+author: "Benedikt Gehr, Stefanie Muff and Clara Panchaud"
+date: "05/07/2021"
+output: pdf_document
+---
+
+
+We start by loading the lynx dataset. 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(survival)
+library(glmmTMB)
+library(TwoStepCLogit)
+load("/Users/Clara/Documents/Master Thesis/Data/Lynx/data/lynx.RData")
+dat <- lynx_table
+```
+
+First, we fit the models with fixed effects only. We want to check that the conditional logistic regression model gives the same results as the poisson reformulation.  We start by fitting the condition logistic regression model.
+```{r}
+run_clog=0
+if (run_clog==1){
+r.clogit <- clogit(formula=use~cover_swisstopo +altitude_swisstopo+
+                     cover_swisstopo:ytcos2 +
+                     cover_swisstopo:tsin +
+                     cover_swisstopo:tsin2 +
+                     cover_swisstopo:tcos2 +
+                     altitude_swisstopo +
+                     hum_indx +
+                     prey_avail +
+                     I(altitude_swisstopo^2) +
+                     I(hum_indx^2) +
+                     I(prey_avail^2) +
+                     altitude_swisstopo:ytcos +
+                   altitude_swisstopo:ytsin2 +
+                   altitude_swisstopo:tcos +
+                   altitude_swisstopo:tsin2 +
+                   dist2 +
+                   hum_indx_loc2:dist2 +
+                   hum_indx:ytsin +
+                   hum_indx:ytcos +
+                   hum_indx:ytcos2 +
+                   hum_indx:tsin +
+                   hum_indx:tcos +
+                   hum_indx:cover_swisstopo +
+                   prey_avail:ytsin2 +
+                   prey_avail:ytcos2 +
+                   prey_avail:tsin +
+                   strata(loc_id), data=dat) 
+
+clog<-data.frame(summary(r.clogit)$coef)
+
+write.csv(clog,"/Users/Clara/Documents/Master Thesis/Data/Lynx/clogit.csv",
+          row.names = TRUE)
+}
+if (run_clog==0){
+  clog=read.csv("/Users/Clara/Documents/Master Thesis/Data/Lynx/clogit.csv",
+                row.names = 1)
+}
+```
+
+Now, we fit the Poisson model and compare the results.
+
+```{r,results=FALSE}
+run_glmm=0
+if (run_glmm==1){
+
+TMBStruc = glmmTMB(use~cover_swisstopo +altitude_swisstopo+
+                  cover_swisstopo:ytcos2 +
+                   cover_swisstopo:tsin +
+                   cover_swisstopo:tsin2 +
+                   cover_swisstopo:tcos2 +
+                   altitude_swisstopo +
+                   hum_indx +
+                   prey_avail +
+                   I(altitude_swisstopo^2) +
+                   I(hum_indx^2) +
+                   I(prey_avail^2) +
+                   altitude_swisstopo:ytcos +
+                   altitude_swisstopo:ytsin2 +
+                   altitude_swisstopo:tcos +
+                   altitude_swisstopo:tsin2 +
+                   dist2 +
+                   hum_indx_loc2:dist2 +
+                   hum_indx:ytsin +
+                   hum_indx:ytcos +
+                   hum_indx:ytcos2 +
+                   hum_indx:tsin +
+                   hum_indx:tcos +
+                   hum_indx:cover_swisstopo +
+                   prey_avail:ytsin2 +
+                   prey_avail:ytcos2 +
+                   prey_avail:tsin +
+                   #prey_avail:tcos+
+                   (1|loc_id), 
+                   family=poisson,
+                   data=dat,
+                   doFit=FALSE)
+
+
+
+TMBStruc$parameters$theta[1] = log(1e3)
+
+TMBStruc$mapArg = list(theta=factor(c(NA)))
+m1 = glmmTMB:::fitTMB(TMBStruc)
+summary(m1)
+glmm=summary(m1)$coef[1]
+write.csv(glmm,"/Users/Clara/Documents/Master Thesis/Data/Lynx/glmm.csv",
+          row.names = TRUE)
+}
+if (run_glmm==0){
+  glmm=read.csv("/Users/Clara/Documents/Master Thesis/Data/Lynx/glmm.csv",
+                row.names = 1)
+}
+
+round(clog[1],digit=2)==round(glmm[2:27,1],digit=2)
+```
+
+We can then move on to the random effects models. We start with the two-step estimation in order to fit a conditional logistic regression with random effects, which gives the same results as the paper that was published on this data.
+
+```{r}
+run_twostep=0
+
+if (run_twostep==1){
+lynx_model <-Ts.estim(formula = use~cover_swisstopo +
+                        cover_swisstopo:ytcos2 +
+                        cover_swisstopo:tsin +
+                        cover_swisstopo:tsin2 +
+                        cover_swisstopo:tcos2 +
+                        altitude_swisstopo +
+                        hum_indx +
+                        prey_avail +
+                        I(altitude_swisstopo^2) +
+                        I(hum_indx^2) +
+                        I(prey_avail^2) +
+                        altitude_swisstopo:ytcos +
+                        altitude_swisstopo:ytsin2 +
+                        altitude_swisstopo:tcos +
+                        altitude_swisstopo:tsin2 +
+                        dist2 +
+                        hum_indx_loc2:dist2 +
+                        hum_indx:ytsin +
+                        hum_indx:ytcos +
+                        hum_indx:ytcos2 +
+                        hum_indx:tsin +
+                        hum_indx:tcos +
+                        hum_indx:cover_swisstopo +
+                        prey_avail:ytsin2 +
+                        prey_avail:ytcos2 +
+                        prey_avail:tsin +
+                        prey_avail:tcos +
+                        strata(loc_id)+cluster(id_anim), data = dat)
+#lynx_model$r.effect
+twostep<-cbind(beta=lynx_model$beta, se =lynx_model$se)
+
+write.csv(twostep,"/Users/Clara/Documents/Master Thesis/Data/Lynx/twostep.csv",
+          row.names = TRUE)
+}
+if (run_twostep==0){
+  twostep=read.csv("/Users/Clara/Documents/Master Thesis/Data/Lynx/twostep.csv",
+                   row.names = 1)
+}
+```
+
+And finally, the Poisson model with random effects.
+
+```{r}
+run_random=0
+
+if (run_random==1){
+TMBStruc = glmmTMB(use~cover_swisstopo +altitude_swisstopo+
+                     cover_swisstopo:ytcos2 +
+                     cover_swisstopo:tsin +
+                     cover_swisstopo:tsin2 +
+                     cover_swisstopo:tcos2 +
+                     hum_indx +
+                     prey_avail +
+                     I(altitude_swisstopo^2) +
+                     I(hum_indx^2) +
+                     I(prey_avail^2) +
+                     altitude_swisstopo:ytcos +
+                   altitude_swisstopo:ytsin2 +
+                   altitude_swisstopo:tcos +
+                   altitude_swisstopo:tsin2 +
+                   dist2 +
+                   hum_indx_loc2:dist2 +
+                   hum_indx:ytsin +
+                   hum_indx:ytcos +
+                   hum_indx:ytcos2 +
+                   hum_indx:tsin +
+                   hum_indx:tcos +
+                   hum_indx:cover_swisstopo +
+                   prey_avail:ytsin2 +
+                   prey_avail:ytcos2 +
+                   prey_avail:tsin +
+                   prey_avail:tcos+
+                     (1|loc_id)+
+                    (0+cover_swisstopo|id_anim) +
+                     (0+altitude_swisstopo|id_anim)+
+                     (0+hum_indx|id_anim)+
+                     (0+prey_avail|id_anim)+
+                     (0+cover_swisstopo:ytcos2|id_anim)+
+                     (0+cover_swisstopo:tsin|id_anim)+
+                     (0+cover_swisstopo:tsin2|id_anim)+
+                     (0+cover_swisstopo:tcos2|id_anim)+
+                     (0+I(altitude_swisstopo^2)|id_anim)+
+                   (0+I(hum_indx^2)|id_anim)+
+                   (0+I(prey_avail^2)|id_anim)+
+                     (0+altitude_swisstopo:ytcos|id_anim)+
+                   (0+altitude_swisstopo:ytsin2|id_anim)+
+                   (0+altitude_swisstopo:tcos|id_anim)+
+                   (0+altitude_swisstopo:tsin2|id_anim)+
+                     (0+hum_indx_loc2:dist2|id_anim) +
+                     (0+hum_indx:ytsin|id_anim) +
+                     (0+hum_indx:ytcos|id_anim) +
+                     (0+hum_indx:ytcos2|id_anim) +
+                     (0+hum_indx:tsin|id_anim) +
+                     (0+hum_indx:tcos|id_anim) +
+                     (0+hum_indx:cover_swisstopo|id_anim) +
+                     (0+prey_avail:ytsin2|id_anim) +
+                     (0+prey_avail:ytcos2|id_anim) +
+                     (0+prey_avail:tsin|id_anim) +
+                     (0+prey_avail:tcos|id_anim) +
+                   (0+dist2|id_anim), 
+                   family=poisson,
+                   data=dat,
+                   doFit=FALSE)
+
+
+
+TMBStruc$parameters$theta[1] = log(1e3)
+TMBStruc$mapArg = list(theta=factor(c(NA,1:27)))
+m = glmmTMB:::fitTMB(TMBStruc)
+
+random=summary(m)$coefficients[1]
+random
+write.csv(random,"/Users/clara/Documents/Master Thesis/Data/Lynx/glmmrandomwithintercept.csv",
+          row.names = TRUE)
+}
+if (run_random==0){
+  random=read.csv("/Users/Clara/Documents/Master Thesis/Data/Lynx/glmmrandomwithintercept.csv",
+                  row.names = 1)
+}
+```
+
+
+
+
+

@@ -1,0 +1,423 @@
+---
+title: "Simulations"
+author: "Johannes Signer and Clara Panchaud"
+date: "05/07/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide'}
+library(sf)
+library(raster)
+library(amt)
+library(tidyverse)
+library(NLMR)
+library(lubridate)
+library(glmmTMB)
+library(ggplot2)
+library(gridExtra)
+library(ggpubr)
+source("/Users/clara/Documents/Master Thesis/Simulations/functions.R")
+```
+
+```{r,message=FALSE,warning=FALSE,fig.show='hide',include=FALSE}
+#curve(dgamma(x, shape = 10, scale = 15), from = 0,
+#to = 300,xlab="x",ylab="density"), title(main="G(10,15)")
+```
+
+
+First, we generate a landscape on which the animal moves. We will use a Gaussian field. We also need to set the coefficients that will be used to simulate the trajectory. The ones for step length and the logarithm of step length are transformations of the parameters of a Gamma distribution G(10,15). We pick a concentration parameter of 0 for the Von Mises distribution of the turning angle. A transformation of this parameter will be the coefficient of the cosine of the turning angle in the model. We define different sets of coefficients, where the variable coefficient takes the values 0.5,-0.5,1,-1. We will only show the code used to perform the analysis on the continuous landscape with the variable coefficient 0.5, as the other cases are done similarly.
+```{r,results = FALSE,message=FALSE,warning=FALSE}
+set.seed(124)
+formula <- ~ var_end + log_sl_ + sl_ + cos_ta_
+coefs <- c("var_end" = 0.5, scale_to_sl(15), shape_to_log_sl(10), kappa_to_cos_ta(0))
+coefs2 <- c("var_end" = -0.5, scale_to_sl(15), shape_to_log_sl(10), kappa_to_cos_ta(0))
+coefs3 <- c("var_end" = 1, scale_to_sl(15), shape_to_log_sl(10), kappa_to_cos_ta(0))
+coefs4 <- c("var_end" = -1, scale_to_sl(15), shape_to_log_sl(10), kappa_to_cos_ta(0))
+```
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+lscp <- NLMR::nlm_gaussianfield(300, 300,nug=0.001, resolution = 10,
+                    autocorr_range=10,user_seed = 5,rescale = FALSE)
+lscp <- stack(lscp)
+names(lscp) <- "var"
+values(lscp)[values(lscp)>=0]=1
+values(lscp)[values(lscp)<0]=0
+lscp<-stack(lscp)
+plot(lscp,legend=FALSE,cex.main=2,cex.axis=1.5,
+     legend.width=0.8,legend.shrink=0.7,axis.args=list( cex.axis=1.5))
+```
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+set.seed(2)
+trk <- simulate_track(formula, coefficients = coefs3,
+       start = c(1500,1500), spatial.covars = lscp,max.dist = 100, n = 500)
+plot(lscp,legend=FALSE,main=expression(paste(" Categorical case 1")),
+     cex.main=2, cex.axis=1.5)
+points(trk$x_, trk$y_)
+```
+
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+set.seed(20)
+trk2 <- simulate_track(formula, coefficients = coefs4,
+        start = c(1500,1500), spatial.covars = lscp,max.dist = 100, n = 500)
+plot(lscp,legend=FALSE,main=expression(paste("Categorical case 2")),expand_limits(x=0),
+     cex.main=2, cex.axis=1.5)
+
+points(trk2$x_, trk2$y_)
+```
+
+Here is how to generate the categorical landscape that we will use.
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide'}
+lscp2 <- NLMR::nlm_gaussianfield(300, 300,nug=0.001,
+         resolution = 10,autocorr_range=20,user_seed = 3,rescale = FALSE)
+lscp2 <- stack(lscp2)
+names(lscp2) <- "var"
+
+plot(lscp2,cex.main=2, cex.axis=1.5,legend.width=0.8,
+     legend.shrink=0.7,axis.args=list( cex.axis=1.5))
+```
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+set.seed(15)
+trk <- simulate_track(formula, coefficients = coefs2,start = c(1500,1500), spatial.covars = lscp2,max.dist = 100, n = 500)
+plot(lscp2,main=expression(paste("Continuous case 2")),
+     cex.main=2, cex.axis=1.5,legend.width=0.8,legend.shrink=0.7,axis.args=list( cex.axis=1.5))
+points(trk$x_, trk$y_)
+```
+And how to generate a track on this landscape.
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide'}
+set.seed(7)
+
+trk <- simulate_track(formula, coefficients = coefs,
+       start = c(1500,1500), spatial.covars = lscp2,max.dist = 100, n = 500)
+plot(lscp2,xlim=c(0,3000),main=expression(paste("Continuous case 1")),
+     cex.main=2, cex.axis=1.5,legend=FALSE)
+points(trk$x_, trk$y_)
+```
+
+
+Here is just a little test to show that the conditional logistic regression model and the Poisson model yield the same results.
+
+```{r,message=FALSE,warning=FALSE}
+set.seed(123)
+
+m<-trk %>% steps %>% random_steps() %>% 
+    extract_covariates(lscp2) %>% 
+    mutate(log_sl_ = log(sl_), cos_ta_ = cos(ta_))
+
+m2<-fit_clogit(case_ ~ var + sl_ + log_sl_ + cos(ta_) + strata(step_id_),data=m)
+
+TMBStruc = glmmTMB(case_ ~ var + sl_ + log_sl_ + cos(ta_) + (1|step_id_),
+                   family=poisson,
+                   data=m,
+                   doFit=FALSE)
+
+TMBStruc$parameters$theta[1] = log(1e3)
+TMBStruc$mapArg = list(theta=factor(c(NA)))
+m1 = glmmTMB:::fitTMB(TMBStruc)
+
+c(summary(m2)$coef[1,1],summary(m1)$coef$cond [2,1] ,
+  summary(m2)$coef[1,3],summary(m1)$coef$cond [2,2] )
+
+
+``` 
+
+
+We then simulate and blur 50 trajectories, to observe the simulation step of SIMEX, even though we do it a little differently than in the original algorithm here. 
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide'}
+set.seed(123)
+run=1
+
+if (run==0){
+  param <- data.frame(matrix(ncol = 3, nrow = 0))
+  names <- c("variable","sd","error")
+  colnames(param) <- names
+  start_variance<-2.5
+  variance<-c(2.5,5,7.5,12.5,17.5,22.5,27.5,32.5,37.5)
+  for (i in 1:50) {
+  
+    trk <- simulate_track(formula, coefficients = coefs,
+           start = c(1500, 1500), spatial.covars = lscp2,max.dist = 50, n = 500)  
+    param[nrow(param) + 1,]=c(fit(trk,lscp2),0)
+    
+    trk_blur<-blur(trk,start_variance)
+    param[nrow(param) + 1,]=c(fit(trk_blur,lscp2),start_variance)
+    
+    for (j in 1:length(variance)) {
+      trk_new<-blur(trk_blur,variance[j])
+      param[nrow(param) + 1,]=c(fit(trk_new,lscp2),variance[j]+start_variance)
+    }
+  }
+  write.csv(param,"/Users/clara/Documents/Master Thesis/Simulations/simex1.csv",
+            row.names = FALSE)
+}
+if (run==1){
+  param=read.csv("/Users/clara/Documents/Master Thesis/Simulations/simex1.csv")
+}
+```
+
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+set.seed(123)
+run2=1
+
+if (run2==0){
+  
+  param2 <- data.frame(matrix(ncol = 3, nrow = 0))
+  names <- c("variable","sd","error")
+  colnames(param2) <- names
+ start_variance<-5
+  variance<-c(5,10,15,20,25,30,35,40,45)
+  for (i in 1:50) {
+  
+    trk <- simulate_track(formula, coefficients = coefs2,start = c(1500, 1500), spatial.covars = lscp2,max.dist = 50, n = 500)  
+    param2[nrow(param2) + 1,]=c(fit(trk,lscp2),0)
+    
+    trk_blur<-blur(trk,start_variance)
+    param2[nrow(param2) + 1,]=c(fit(trk_blur,lscp2),start_variance)
+    
+    for (j in 1:length(variance)) {
+      trk_new<-blur(trk_blur,variance[j])
+      param2[nrow(param2) + 1,]=c(fit(trk_new,lscp2),variance[j]+start_variance)
+    }
+  }
+  write.csv(param2,"/Users/clara/Documents/Master Thesis/Simulations/simex2.csv", row.names = FALSE)
+
+}
+
+if (run2==1){
+  param2=read.csv("/Users/clara/Documents/Master Thesis/Simulations/simex2.csv")
+}
+
+```
+
+
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,echo=FALSE}
+set.seed(123)
+run3=1
+if (run3==0){
+  
+
+param3 <- data.frame(matrix(ncol = 3, nrow = 0))
+names <- c("variable","sd","error")
+colnames(param3) <- names
+start_variance<-5
+variance<-c(5,10,15,20,25,30,35,40,45)
+for (i in 1:50) {
+
+  trk <- simulate_track(formula, coefficients = coefs3,start = c(1500, 1500), spatial.covars = lscp,max.dist = 50, n = 500)  
+  param3[nrow(param3) + 1,]=c(fit(trk,lscp),0)
+  
+  trk_blur<-blur(trk,start_variance)
+  param3[nrow(param3) + 1,]=c(fit(trk_blur,lscp),start_variance)
+  
+  for (j in 1:length(variance)) {
+    trk_new<-blur(trk_blur,variance[j])
+    param3[nrow(param3) + 1,]=c(fit(trk_new,lscp),variance[j]+start_variance)
+  }
+}
+write.csv(param3,"/Users/clara/Documents/Master Thesis/Simulations/simex3.csv", row.names = FALSE)
+
+}
+
+if (run3==1){
+  param3=read.csv("/Users/clara/Documents/Master Thesis/Simulations/simex3.csv")
+}
+```
+
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,echo=FALSE}
+set.seed(123)
+run4=1
+if (run4==0){
+
+  param4 <- data.frame(matrix(ncol = 3, nrow = 0))
+  names <- c("variable","sd","error")
+  colnames(param4) <- names
+  start_variance<-5
+  variance<-c(5,10,15,20,25,30,35,40,45)
+  for (i in 1:50) {
+  
+    trk <- simulate_track(formula, coefficients = coefs4,start = c(1500, 1500), spatial.covars = lscp,max.dist = 50, n = 500)  
+    param4[nrow(param4) + 1,]=c(fit(trk,lscp),0)
+    
+    trk_blur<-blur(trk,start_variance)
+    param4[nrow(param4) + 1,]=c(fit(trk_blur,lscp),start_variance)
+    
+    for (j in 1:length(variance)) {
+      trk_new<-blur(trk_blur,variance[j])
+      param4[nrow(param4) + 1,]=c(fit(trk_new,lscp),variance[j]+start_variance)
+    }
+  }
+  write.csv(param4,"/Users/clara/Documents/Master Thesis/Simulations/simex4.csv", row.names = FALSE)
+}
+if (run4==1){
+  param4=read.csv("/Users/clara/Documents/Master Thesis/Simulations/simex4.csv")
+}
+```
+
+Now, we can group the results by error level and find the mean parameter. Then, we extrapolate back to 0 error, once starting from error variance 5 and once 15. For each extrapolation we use the AIC criteria to pick the type of extrapolation.
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide'}
+set.seed(123)
+df<-param %>% group_by(error) %>% summarise(variable=mean(variable))
+df2<-subset(df,error!=0)
+df20<-subset(df,error!=0 & error!=5 & error!=10)
+
+standard_error<-param %>% group_by(error) %>% summarise(variable=mean(sd))
+
+fit = lm(variable ~ error, data = df2)
+fit2 = lm(variable ~ error+I(error^2), data = df2)
+fit3 = lm(variable ~ error+I(error^2)+I(error^3), data = df2)
+
+c(AIC(fit),AIC(fit2),AIC(fit3))
+
+fits = lm(variable ~ error, data = df20)
+fit2s = lm(variable ~ error+I(error^2), data = df20)
+fit3s = lm(variable ~ error+I(error^2)+I(error^3), data = df20)
+
+c(AIC(fits),AIC(fit2s),AIC(fit3s))
+
+new_df<-data.frame(error=0)
+p<-predict(fit3, newdata = new_df, interval = "confidence", type = "response")
+p2<-predict(fit3s, newdata = new_df, interval = "confidence", type = "response")
+
+plot1<-ggplot(data=param, aes(group=error,x=error,
+       y=variable)) + geom_boxplot()+geom_point(aes(y = p[1],
+       x = 0,colour="SIMEX parameter"),size=2.5)+geom_point(aes(y = p2[1],
+       x = 0,colour="SIMEX 2" ),size=2.5)+
+       theme(legend.position="none",legend.text = element_text(size=11))+
+       ggtitle(expression(paste("Continuous case 1, ",
+       beta[1],"=0.5")))+theme(axis.title=element_text(size=18),
+       axis.text=element_text(size=15),plot.title = element_text(size=20,
+       hjust = 0.5))+ylim(0.30,0.55)+geom_point(data = df,
+       mapping = aes(x = error, y = variable,
+       color="Mean estimated parameters per error"),size=2.5)+ylab("parameter")
+```
+
+
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+set.seed(123)
+dfsecond<-param2 %>% group_by(error) %>% summarise(variable=mean(variable))
+df2<-subset(dfsecond,error!=0)
+df20<-subset(dfsecond,error!=0 & error!=5 & error!=10)
+
+stderr2<-param2 %>% group_by(error) %>% summarise(variable=mean(sd))
+
+fit = lm(variable ~ error, data = df2)
+fit2 = lm(variable ~ error+I(error^2), data = df2)
+fit3 = lm(variable ~ error+I(error^2)+I(error^3), data = df2)
+
+#c(AIC(fit),AIC(fit2),AIC(fit3))
+
+
+fits = lm(variable ~ error, data = df20)
+fit2s = lm(variable ~ error+I(error^2), data = df20)
+fit3s = lm(variable ~ error+I(error^2)+I(error^3), data = df20)
+
+#c(AIC(fits),AIC(fit2s),AIC(fit3s))
+
+new_df<-data.frame(error=0)
+p3<-predict(fit2, newdata = new_df, interval = "confidence", type = "response")
+p4<-predict(fit3s, newdata = new_df, interval = "confidence", type = "response")
+
+
+
+plot2<-ggplot(data=param2, aes(group=error,x=error, y=variable)) + geom_boxplot()+geom_point(aes(y = p3[1], x = 0,colour="SIMEX parameter"),size=2.5)+geom_point(aes(y = p4[1], x = 0,colour="SIMEX 2" ),size=2.5)+theme(legend.position="none",legend.text = element_text(size=11))+ggtitle(expression(paste("Continuous case 2, ",beta[1],"=-0.5")))+theme(axis.title=element_text(size=18),axis.text=element_text(size=15),plot.title = element_text(size=20,hjust = 0.5))+ylim(-0.55,-0.3)+geom_point(data = dfsecond, mapping = aes(x = error, y = variable,color="Mean parameter per error level"),size=2.5)+ylab("parameter")
+plot2
+```
+
+
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+set.seed(123)
+dfthird<-param3 %>% group_by(error) %>% summarise(variable=mean(variable))
+df2<-subset(dfthird,error!=0)
+df20<-subset(dfthird,error!=0 & error!=5 & error!=10)
+
+stderr3<-param3 %>% group_by(error) %>% summarise(sd=mean(sd))
+
+
+fit = lm(variable ~ error, data = df2)
+fit2 = lm(variable ~ error+I(error^2), data = df2)
+fit3 = lm(variable ~ error+I(error^2)+I(error^3), data = df2)
+
+#c(AIC(fit),AIC(fit2),AIC(fit3))
+
+
+fits = lm(variable ~ error, data = df20)
+fit2s = lm(variable ~ error+I(error^2), data = df20)
+fit3s = lm(variable ~ error+I(error^2)+I(error^3), data = df20)
+
+#c(AIC(fits),AIC(fit2s),AIC(fit3s))
+
+new_df<-data.frame(error=0)
+p5<-predict(fit2, newdata = new_df, interval = "confidence", type = "response")
+p6<-predict(fit2s, newdata = new_df, interval = "confidence", type = "response")
+
+plot3<-ggplot(data=param3, aes(group=error,x=error, y=variable))+ geom_boxplot()+geom_point(aes(y = p5[1], x = 0,colour="SIMEX parameter"),size=2.5)+geom_point(aes(y = p6[1], x = 0,colour="SIMEX 2 parameter"),size=2.5)+theme(legend.position="none",legend.text = element_text(size=11))+ggtitle(expression(paste("Categorical case 1, ",beta[1],"=1")))+theme(axis.title=element_text(size=18),axis.text=element_text(size=15),plot.title = element_text(size=20,hjust = 0.5))+ylim(0.3,1.3)+geom_point(data = dfthird, mapping = aes(x = error, y = variable,color="Mean parameter per error level"),size=2.5)+ylab("parameter")
+plot3
+```
+
+```{r,results = FALSE,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+set.seed(123)
+dffour<-param4 %>% group_by(error) %>% summarise(variable=mean(variable))
+df2<-subset(dffour,error!=0)
+df20<-subset(dffour,error!=0 & error!=5 & error!=10)
+sdfour<-param4 %>% group_by(error) %>% summarise(variable=mean(sd))
+
+
+fit = lm(variable ~ error, data = df2)
+fit2 = lm(variable ~ error+I(error^2), data = df2)
+fit3 = lm(variable ~ error+I(error^2)+I(error^3), data = df2)
+
+#c(AIC(fit),AIC(fit2),AIC(fit3))
+
+
+fits = lm(variable ~ error, data = df20)
+fit2s = lm(variable ~ error+I(error^2), data = df20)
+fit3s = lm(variable ~ error+I(error^2)+I(error^3), data = df20)
+
+#c(AIC(fits),AIC(fit2s),AIC(fit3s))
+
+new_df<-data.frame(error=0)
+p7<-predict(fit3, newdata = new_df, interval = "confidence", type = "response")
+p8<-predict(fit3s, newdata = new_df, interval = "confidence", type = "response")
+
+
+plot4<-ggplot(data=param4, aes(group=error,x=error, y=variable))+ geom_boxplot()+geom_point(aes(y = p7[1], x = 0,colour="SIMEX parameter"),size=2.5)+geom_point(aes(y = p8[1], x = 0,colour="SIMEX 2 parameter"),size=2.5)+theme(legend.position="none",legend.text = element_text(size=11))+labs(color="")+ggtitle(expression(paste("Categorical case 2, ",beta[1],"=-1")))+theme(axis.title=element_text(size=18),axis.text=element_text(size=15),plot.title = element_text(size=20,hjust = 0.5))+ylim(-1.2,-0.5)+geom_point(data = dffour, mapping = aes(x = error, y = variable,color="Mean parameter per error level"),size=2.5)+xlab("error variance")+ylab("parameter")
+plot4
+```
+
+
+
+
+```{r,echo=FALSE,results = FALSE,message=FALSE}
+sqrt(find_variance(subset(param,error!=0)))
+sqrt(find_variance(subset(param2,error!=0)))
+sqrt(find_variance(subset(param3,error!=0)))
+sqrt(find_variance(subset(param4,error!=0)))
+
+sqrt(find_variance(subset(param,error!=0 & error!=5 & error!=10)))
+sqrt(find_variance(subset(param2,error!=0 & error!=5 & error!=10)))
+sqrt(find_variance(subset(param3,error!=0 & error!=5 & error!=10)))
+sqrt(find_variance(subset(param4,error!=0 & error!=5 & error!=10)))
+```
+
+
+
+
+

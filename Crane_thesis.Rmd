@@ -1,0 +1,368 @@
+---
+title: "Crane analysis"
+author: "David Wolfson and Clara Panchaud"
+date: "5/7/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F)
+```
+
+```{r}
+source("/Users/clara/Documents/Master Thesis/Simulations/functions.R")
+library(raster)
+library(rgdal)
+library(here)
+library(tidyverse)
+library(sf)
+library(amt)
+```
+
+We start by importing the raster that represents the environmental variable. It is a general land cover layer with the extent of Minnesota.
+
+```{r}
+ras<-raster(here("/Users/clara/Documents/Master Thesis/Code/Crane/nlcdmnutm15.tif"))
+```
+
+We then bring in GPS points, select one individual, and filter to keep only the locations in Minnesota.
+
+```{r}
+df1 <- read_csv(here("df16.csv"))
+df <- subset(df1,id=="7J (Melby colt #1)" )
+df<-df %>% filter(location.long>(-96),
+                    location.long<(-93),
+                    location.lat>45,
+                    location.lat<48)
+```
+
+We make the data into a track.
+```{r}
+track<-make_track(df,location.long,location.lat,loctime, crs = CRS("+init=epsg:4326"))
+track <- transform_coords(track, CRS(proj4string(ras))) 
+```
+
+We can now prepare the track to be fitted, by among other things sampling available steps and extracting the covariate. The land cover gives a lot of categories, so we regroup into 7 categories, with 'wetlands' as the reference category. We then fit the conditional logistic regression.
+
+```{r,message=FALSE,warning=FALSE}
+set.seed(123)
+trk<-prepare_track(track)
+fit<-trk%>% fit_clogit(case_ ~ category + sl_ + log_sl_ + cos(ta_) + strata(step_id_)) 
+```
+
+We can then apply SIMEX on the data. We vector $variance$ contains the variances of the error that will be used to blur the original track. 
+
+```{r,message=FALSE,warning=FALSE}
+set.seed(123)
+start_variance<-1200
+run=1
+if (run==0){
+param <- data.frame(matrix(ncol = 13, nrow = 0))
+names <- c("categorybarren","categorydeveloped","categoryforest",
+           "categoryherbaceous","categoryplanted_cultivated",
+           "categorywater","SDbarren","SDdeveloped","SDforest",
+           "SDherbaceous","SDplanted_cultivated","SDwater","error")
+colnames(param) <- names
+variance<-c(500,1000,1500,2000,2500,3000,3500,4000,4500,5000,5500,6000,6500,7000)
+param[nrow(param) + 1,]=c(summary(fit)$coef[1:6,1],
+                          summary(fit)$coef[1:6,3]^2,start_variance)
+
+for (j in 1:length(variance)) {
+  for (i in 1:50){
+    trk_blur<-blur(track,variance[j])
+    trk_blur<-prepare_track(trk_blur)
+    fit_blur<-trk_blur%>% fit_clogit(case_ ~ category + sl_ +
+                              log_sl_ + cos(ta_) + strata(step_id_))
+    param[nrow(param) + 1,]=c(summary(fit_blur)$coef[1:6,1],
+                              summary(fit_blur)$coef[1:6,3]^2,start_variance+variance[j])
+  }
+}
+}
+
+if (run==1){
+param<-read.csv("/Users/clara/Documents/Master Thesis/Code/Crane/crane_results4.csv")
+param[1,]=c(summary(fit)$coef[1:6,1],summary(fit)$coef[1:6,3]^2,start_variance)
+}
+
+```
+
+We realised that there was a mistake in the above code, as we saved the variances and not the standard deviations under the name SD. Instead of running the code again, we change the names of the columns to fix that mistake. 
+
+```{r}
+names <- c("categorybarren","categorydeveloped","categoryforest",
+           "categoryherbaceous","categoryplanted_cultivated",
+           "categorywater","Variancebarren","Variancedeveloped","Varianceforest",
+           "Varianceherbaceous","Varianceplanted_cultivated","Variancewater","error")
+colnames(param) <- names
+```
+
+
+
+Now that we have the results from the simulation part of SIMEX, we plot the results for each category and proceed with the extrapolation to obtain the SIMEX parameter. We extrapolate with a linear, quadratic and cubic function, and pick the best one according to the AIC criteria. We also find the standard errors of the SIMEX parameter. Here is the code for one category, as they are all similar. 
+
+```{r,message=FALSE,warning=FALSE,results=FALSE,fig.show='hide'}
+df<-param %>% group_by(error) %>% 
+  summarise(categoryplanted_cultivated=mean(categoryplanted_cultivated))
+
+fit = lm(categoryplanted_cultivated ~ error, data = df)
+fit2 = lm(categoryplanted_cultivated ~ error+I(error^2), data = df)
+fit3 = lm(categoryplanted_cultivated ~ error+I(error^2)+I(error^3), data = df)
+
+c(AIC(fit),AIC(fit2),AIC(fit3))
+
+new_df<-data.frame(error=0)
+p<-predict(fit2, newdata = new_df, interval = "confidence", type = "response")
+naive<-as.double(subset(df,error==1200)[2])
+
+variable<-pull(param,categoryplanted_cultivated)
+variance<-pull(param,Varianceplanted_cultivated)
+error<-pull(param,error)
+sd<-sqrt(variance)
+dfvar<-data.frame(variable,sd,error)
+sdplanted<-sqrt(find_variance(subset(dfvar,error!=1200)))
+
+confsimex<-ConfidenceInt(p[1],sdplanted)
+conf<-ConfidenceInt(param[1,5],sqrt(param[1,11]))
+
+plot<-ggplot(data=subset(param,error!=1200), aes(group=error,x=error,
+        y=categoryplanted_cultivated)) + geom_boxplot()+xlim(0,8500)+
+        ylim(-0.25,-0.05)+geom_point(aes(y = p[1], x = 0,
+        color="SIMEX parameter from quadratic extrapolation",
+        label="hello"),size=3.5)+xlab("error variance")+
+        ylab("parameter")+
+        ggtitle(label="Planted Cultivated")+
+        theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))+
+        labs(color="")+theme(legend.position="none")+
+        geom_point(data = subset(df,error!=1200), mapping = aes(x = error,
+        y = categoryplanted_cultivated,color="mean parameter per error level"),size=3.5)+
+        theme(axis.title=element_text(size=20),axis.text=element_text(size=15),
+        plot.title = element_text(size=26,hjust = 0.5))+
+  geom_point(aes(y = naive, x = 1200, color="naive parameter",label="blop"),size=3.5)+
+  geom_segment(aes(x=1200,y=conf[2],xend=1200,yend=conf[1]),color="chartreuse4",size=0.7)+
+  geom_segment(aes(x=0,y=confsimex[1],xend=0,yend=confsimex[2]),color="steelblue3",size=0.7)
+plot
+```
+
+
+
+```{r,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+df<-param %>% group_by(error) %>% summarise(categoryherbaceous=mean(categoryherbaceous))
+
+fit2 = lm(categoryherbaceous ~ error, data = df)
+
+fit = lm(categoryherbaceous ~ error+I(error^2), data = df)
+
+fit3 = lm(categoryherbaceous ~ error+I(error^2)+I(error^3), data = df)
+
+#c(AIC(fit2),AIC(fit),AIC(fit3))
+
+new_df<-data.frame(error=0)
+p<-predict(fit3, newdata = new_df, interval = "confidence", type = "response")
+naive<-as.double(subset(df,error==1200)[2])
+
+variable<-pull(param,categoryherbaceous)
+variance<-pull(param,Varianceherbaceous)
+error<-pull(param,error)
+sd<-sqrt(variance)
+dfvar<-data.frame(variable,sd,error)
+sdherbaceous<-sqrt(find_variance(subset(dfvar,error!=1200)))
+confsimex<-ConfidenceInt(p[1],sdherbaceous)
+conf<-ConfidenceInt(param[1,4],sqrt(param[1,10]))
+
+
+plot<-ggplot(data=subset(param,error!=1200), aes(group=error,x=error, y=categoryherbaceous)) +
+  geom_boxplot()+xlim(0,8500)+ylim(-0.5,1.2)+
+  geom_point(aes(y = p[1], x = 0, color="SIMEX parameter",label="hello"),size=3.5)+
+  xlab("error variance")+ylab("parameter")+
+  ggtitle(label="Herbaceous")+
+  theme(plot.title = element_text(hjust = 0.5),
+  plot.subtitle = element_text(hjust = 0.5))+
+  labs(color="")+theme(legend.position="none")+
+  geom_point(data = subset(df,error!=1200), mapping = aes(x = error,
+  y = categoryherbaceous,color="mean parameter per error level"),size=3.5)+
+  theme(axis.title=element_text(size=20),axis.text=element_text(size=15),
+  plot.title = element_text(size=26,hjust = 0.5))+
+  geom_point(aes(y = naive, x = 1200, color="naive parameter",label="blop"),size=3.5)+
+  geom_segment(aes(x=1200,y=conf[2],xend=1200,yend=conf[1]),color="chartreuse4",size=0.7)+
+  geom_segment(aes(x=0,y=confsimex[1],xend=0,yend=confsimex[2]),color="steelblue3",size=0.7)
+plot
+```
+
+
+
+
+
+
+```{r,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+df<-param %>% group_by(error) %>% summarise(categoryforest=mean(categoryforest))
+
+fit2 = lm(categoryforest ~ error, data = df)
+
+fit = lm(categoryforest ~ error+I(error^2), data = df)
+
+fit3 = lm(categoryforest ~ error+I(error^2)+I(error^3), data = df)
+
+#c(AIC(fit2),AIC(fit),AIC(fit3))
+
+new_df<-data.frame(error=0)
+p<-predict(fit3, newdata = new_df, interval = "confidence", type = "response")
+naive<-as.double(subset(df,error==1200)[2])
+
+variable<-pull(param,categoryforest)
+variance<-pull(param,Varianceforest)
+error<-pull(param,error)
+sd<-sqrt(variance)
+dfvar<-data.frame(variable,sd,error)
+sdforest<-sqrt(find_variance(subset(dfvar,error!=1200)))
+confsimex<-ConfidenceInt(p[1],sdforest)
+conf<-ConfidenceInt(param[1,3],sqrt(param[1,9]))
+
+
+plot<-ggplot(data=subset(param,error!=1200), aes(group=error,x=error, y=categoryforest)) +
+  geom_boxplot()+xlim(0,8500)+ylim(-0.7,-0.35)+
+  geom_point(aes(y = p[1], x = 0, color="SIMEX parameter from cubic extrapolation",
+  label="hello"),size=3.5)+xlab("error variance")+ylab("parameter")+
+  ggtitle(label="Forest")+
+  theme(plot.title = element_text(hjust = 0.5),
+  plot.subtitle = element_text(hjust = 0.5))+
+  labs(color="")+theme(legend.position="none")+
+  geom_point(data = subset(df,error!=1200), mapping = aes(x = error,
+  y = categoryforest,color="mean parameter per error level"),size=3.5)+
+  theme(axis.title=element_text(size=20),axis.text=element_text(size=15),
+  plot.title = element_text(size=26,hjust = 0.5))+
+  geom_point(aes(y = naive, x = 1200, color="naive parameter",label="blop"),size=3.5)+
+  geom_segment(aes(x=1200,y=conf[2],xend=1200,yend=conf[1]),color="chartreuse4",size=0.7)+
+  geom_segment(aes(x=0,y=confsimex[1],xend=0,yend=confsimex[2]),color="steelblue3",size=0.7)
+
+plot
+```
+
+
+```{r,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+df<-param %>% group_by(error) %>% summarise(categorydeveloped=mean(categorydeveloped))
+
+fit2 = lm(categorydeveloped ~ error, data = df)
+
+fit = lm(categorydeveloped ~ error+I(error^2), data = df)
+
+fit3 = lm(categorydeveloped~ error+I(error^2)+I(error^3), data = df)
+
+#c(AIC(fit2),AIC(fit),AIC(fit3))
+
+new_df<-data.frame(error=0)
+p<-predict(fit3, newdata = new_df, interval = "confidence", type = "response")
+naive<-as.double(subset(df,error==1200)[2])
+
+variable<-pull(param,categorydeveloped)
+variance<-pull(param,Variancedeveloped)
+error<-pull(param,error)
+sd<-sqrt(variance)
+dfvar<-data.frame(variable,sd,error)
+sddeveloped<-sqrt(find_variance(subset(dfvar,error!=1200)))
+confsimex<-ConfidenceInt(p[1],sddeveloped)
+conf<-ConfidenceInt(param[1,2],sqrt(param[1,8]))
+
+plot<-ggplot(data=subset(param,error!=1200), aes(group=error,x=error, y=categorydeveloped)) +
+  geom_boxplot()+xlim(0,8500)+ylim(-3.3,-0.9)+
+  geom_point(aes(y = p[1], x = 0, color="SIMEX parameter from cubic extrapolation",
+  label="hello"),size=3.5)+xlab("error variance")+
+  ylab(" parameter")+
+  ggtitle(label="Developed")+
+  theme(plot.title = element_text(hjust = 0.5),
+  plot.subtitle = element_text(hjust = 0.5)
+ )+labs(color="")+theme(legend.position="none")+
+  geom_point(data = subset(df,error!=1200), mapping = aes(x = error,
+  y = categorydeveloped,color="mean parameter per error level"),size=3.5)+
+ theme(axis.title=element_text(size=20),axis.text=element_text(size=15),
+ plot.title = element_text(size=26,hjust = 0.5))+
+  geom_point(aes(y = naive, x = 1200, color="naive parameter",label="blop"),size=3.5)+
+  geom_segment(aes(x=1200,y=conf[2],xend=1200,yend=conf[1]),color="chartreuse4",size=0.7)+
+  geom_segment(aes(x=0,y=confsimex[1],xend=0,yend=confsimex[2]),color="steelblue3",size=0.7)
+
+plot
+```
+
+
+```{r,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+df<-param %>% group_by(error) %>% summarise(categorybarren=mean(categorybarren))
+
+fit2 = lm(categorybarren ~ error, data = df)
+
+fit = lm(categorybarren ~ error+I(error^2), data = df)
+
+fit3 = lm(categorybarren~ error+I(error^2)+I(error^3), data = df)
+
+#c(AIC(fit2),AIC(fit),AIC(fit3))
+
+new_df<-data.frame(error=0)
+p<-predict(fit3, newdata = new_df, interval = "confidence", type = "response")
+naive<-as.double(subset(df,error==1200)[2])
+
+conf<-ConfidenceInt(param[1,1],sqrt(param[1,7]))
+
+plot<-ggplot(data=subset(param,error!=1200), aes(group=error,x=error, y=categorybarren)) +
+  geom_boxplot()+xlim(0,8500)+ylim(0,1.5)+
+  xlab("error variance")+ylab("parameter")+ggtitle(label="Barren")+
+  theme(plot.title = element_text(hjust = 0.5),
+  plot.subtitle = element_text(hjust = 0.5))+
+  labs(color="")+theme(legend.position="none")+
+  theme(axis.title=element_text(size=20),axis.text=element_text(size=15),
+  plot.title = element_text(size=26,hjust = 0.5))+geom_point(data = subset(df,error!=1200),
+  mapping = aes(x = error, y = categorybarren,color="mean parameter per error level"),size=3.5)+
+  geom_point(aes(y = naive, x = 1200, color="naive parameter",label="blop"),size=3.5)+
+  geom_segment(aes(x=1200,y=conf[2],xend=1200,yend=conf[1]),color="chartreuse4",size=0.7)
+
+
+plot
+```
+
+
+
+```{r,message=FALSE,warning=FALSE,fig.show='hide',echo=FALSE}
+df<-param %>% group_by(error) %>% summarise(categorywater=mean(categorywater))
+
+fit2 = lm(categorywater ~ error, data = df)
+
+fit = lm(categorywater ~ error+I(error^2), data = df)
+
+fit3 = lm(categorywater~ error+I(error^2)+I(error^3), data = df)
+
+#c(AIC(fit2),AIC(fit),AIC(fit3))
+
+new_df<-data.frame(error=0)
+p<-predict(fit, newdata = new_df, interval = "confidence", type = "response")
+naive<-as.double(subset(df,error==1200)[2])
+
+variable<-pull(param,categorywater)
+variance<-pull(param,Variancewater)
+error<-pull(param,error)
+sd<-sqrt(variance)
+dfvar<-data.frame(variable,sd,error)
+sdwater<-sqrt(find_variance(subset(dfvar,error!=1200)))
+confsimex<-ConfidenceInt(p[1],sdwater)
+conf<-ConfidenceInt(param[1,6],sqrt(param[1,12]))
+
+plot<-ggplot(data=subset(param,error!=1200), aes(group=error,x=error, y=categorywater)) +
+  geom_boxplot()+xlim(0,8500)+ylim(0.75,1.25)+
+  geom_point(aes(y = p[1], x = 0, color="SIMEX parameter ",label="hello"),size=3.5)+
+  xlab("error variance")+ylab("parameter")+
+  ggtitle(label="Water")+
+  theme(plot.title = element_text(hjust = 0.5),
+  plot.subtitle = element_text(hjust = 0.5))+
+  labs(color="")+theme(legend.position="none")+
+  geom_point(data = subset(df,error!=1200), mapping = aes(x = error,
+  y = categorywater,color="mean parameter per error level"),size=3.5)+
+  theme(axis.title=element_text(size=20),axis.text=element_text(size=15),
+  plot.title = element_text(size=26,hjust = 0.5))+
+  geom_point(aes(y = naive, x = 1200, color="naive parameter",label="blop"),size=3.5)+
+  geom_segment(aes(x=1200,y=conf[2],xend=1200,yend=conf[1]),color="chartreuse4",size=0.7)+
+  geom_segment(aes(x=0,y=confsimex[1],xend=0,yend=confsimex[2]),color="steelblue3",size=0.7)
+plot
+```
+
+
+
+
+
+
